@@ -18,36 +18,15 @@
 #ifndef __UPOOL_H__
 #define __UPOOL_H__
 
-#include <pthread.h>
-
 #define UP_SUCCESS 0
 #define UP_ERROR_MALLOC -1
 #define UP_ERROR_THREAD_CREATE -2
+#define UP_ERROR_THREAD_JOIN -3
+#define UP_ERROR_MUTEX_LOCK -4
+#define UP_ERROR_MUTEX_DESTROY -5
+#define UP_ERROR_COND_DESTROY -6
 
-#define up_handle_error_en_return(msg, en, retv) \
-    do { errno = en; perror(msg); return retv; } while (0)
-
-#define up_handle_error_return(msg, retv) \
-    do { perror(msg); return retv; } while (0)
-
-typedef struct up_task {
-    void (*task_routine) (void *);        /* Pointer to the routine to execute. */
-    void *arg;                            /* Pointer to the arg of the routine. */
-} up_task_t;
-
-typedef struct up_node {
-    up_task_t task;                       /* The task to be executed. */
-    struct up_node *next;                 /* Pointer to the next queue node. */
-} up_node_t;
-
-typedef struct up_pool {
-    size_t thread_count;                  /* Number of threads of the Pool. */
-    size_t enq_count, deq_count;          /* Enqueued/Dequeued task counters. */
-    pthread_t *threads;                   /* Array of thread IDs. */
-    pthread_cond_t cond;                  /* Condition to signal threads for tasks. */
-    pthread_mutex_t enq_lock, deq_lock;   /* Task queue's locks. */
-    up_node_t *head, *tail;               /* Task queue's head, tail. */
-} up_pool_t;
+typedef struct up_pool up_pool_t;
 
 int up_pool_create(up_pool_t **pool, size_t n);
 int up_pool_destroy(up_pool_t *pool);

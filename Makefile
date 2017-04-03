@@ -1,4 +1,4 @@
-CFLAGS=-std=c99 -O3 -g -pedantic-errors -Wall -pthread
+CFLAGS=-ansi -O3 -g -pedantic-errors -Wall -pthread
 LFLAGS=-Wall -lpthread
 ARFLAGS=-rcs
 

@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <pthread.h>
 
 #include "../src/upool.h"
 
@@ -7,31 +8,34 @@ void largest_prime_naive(void *arg);
 
 int main()
 {
-    const unsigned int INPUT_SIZE = 30;
-    const unsigned int THREAD_COUNT = 8;
+    size_t i;
+    int *args;
+    up_pool_t *pool;
 
-    // Prepare arguments.
-    int *args = (int *) calloc(INPUT_SIZE, sizeof(unsigned int));
-    for (int i = 0; i < INPUT_SIZE; i++) {
+    const size_t INPUT_SIZE = 30;
+    const size_t THREAD_COUNT = 8;
+
+    /* Prepare arguments. */
+    args = (int *) calloc(INPUT_SIZE, sizeof(unsigned int));
+    for (i = 0; i < INPUT_SIZE; i++) {
         args[i] = rand() % 1000;
     }
 
-    // Create Pool.
-    up_pool_t *pool = NULL;
+    /* Create Pool. */
     up_pool_create(&pool, THREAD_COUNT);
 
-    // Submit work to Pool.
-    for (int i = 0; i < INPUT_SIZE; i++) {
+    /* Submit work to Pool. */
+    for (i = 0; i < INPUT_SIZE; i++) {
         up_pool_submit(pool, largest_prime_naive, (void *) &args[i]);
     }
 
-    // Wait for Pool.
+    /* Wait for Pool. */
     up_pool_wait(pool);
 
-    // Release Pool's locks.
+    /* Release Pool's locks. */
     up_pool_release(pool);
 
-    // Destroy Pool.
+    /* Destroy Pool. */
     up_pool_destroy(pool);
 
     return 0;
@@ -40,15 +44,16 @@ int main()
 /* Find the largest prime less than or equal to `n`. */
 void largest_prime_naive(void *arg)
 {
+    size_t i, j;
     int n = *(int *) arg;
 
-    for (int i = n; i > 0; i--) {
-        int j = 2;
+    for (i = n; i > 0; i--) {
+        j = 2;
 
         for ( ; i % j != 0; j++) { }
 
         if (j == i) {
-            printf("(%d, %d)\n", n, j);
+            printf("(%d, %ld)\n", n, j);
             break;
         }
     }

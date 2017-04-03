@@ -91,12 +91,13 @@ void consumer_routine(void *arg)
 
 int test_pool_enq_deq_locked(void *context)
 {
+    int retv;
     up_pool_t *pool = (up_pool_t *) context;
 
     /* Block task execution. */
     pthread_mutex_lock(&pool->deq_lock);
 
-    int retv = up_pool_submit(pool, consumer_routine, NULL);
+    retv = up_pool_submit(pool, consumer_routine, NULL);
 
     /* Assert submit was succesful. */
     assert_equals(retv, UP_SUCCESS);
@@ -131,12 +132,13 @@ int test_pool_enq_deq_locked(void *context)
 
 int test_pool_deq_enq_locked(void *context)
 {
+    int retv;
     up_pool_t *pool = (up_pool_t *) context;
 
     /* Block task execution. */
     pthread_mutex_lock(&pool->deq_lock);
 
-    int retv = up_pool_submit(pool, consumer_routine, NULL);
+    retv = up_pool_submit(pool, consumer_routine, NULL);
 
     /* Assert submit was succesful. */
     assert_equals(retv, UP_SUCCESS);
@@ -198,6 +200,10 @@ void consumer_routine_sleeper(void *arg)
 
 int test_pool_destroy_during_execution(void *context)
 {
+    int retv;
+    size_t i;
+    void *retval;
+    up_node_t *n, *t;
     up_pool_t *pool = (up_pool_t *) context;
 
     /* Initialize TestConsumerContext.
@@ -216,7 +222,7 @@ int test_pool_destroy_during_execution(void *context)
     pthread_mutex_init(&c.lock, NULL);
 
     /* Submit a task that will block. */
-    int retv = up_pool_submit(pool, consumer_routine_sleeper, (void *) &c);
+    retv = up_pool_submit(pool, consumer_routine_sleeper, (void *) &c);
     assert_equals(retv, UP_SUCCESS);
 
     /* Wait for task to start. */
@@ -235,7 +241,6 @@ int test_pool_destroy_during_execution(void *context)
     pthread_mutex_unlock(&c.lock);
 
     /* Assert that the task was cancelled. */
-    void *retval = NULL;
     retv = pthread_join(c.thread_id, &retval);
     assert_equals(retv, 0);
     assert_equals(retval, PTHREAD_CANCELED);
@@ -245,10 +250,10 @@ int test_pool_destroy_during_execution(void *context)
 
     /* Try to destroy the pool. */
     retv = up_pool_destroy(pool);
-    assert_equals(retv, ESRCH);
+    assert_equals(retv, UP_ERROR_THREAD_JOIN);
 
     /* Cleanup since `up_pool_destroy` failed. */
-    for (int i = 0; i < pool->thread_count; i++) {
+    for (i = 0; i < pool->thread_count; i++) {
         retv = pthread_join(pool->threads[i], NULL);
     }
 
@@ -258,9 +263,9 @@ int test_pool_destroy_during_execution(void *context)
     pthread_mutex_destroy(&pool->enq_lock);
     pthread_mutex_destroy(&pool->deq_lock);
 
-    for (up_node_t *c = pool->head; c != NULL; ) {
-        up_node_t *t = c;
-        c = c->next;
+    for (n = pool->head; n != NULL; ) {
+        t = n;
+        n = n->next;
         free(t);
     }
 
@@ -275,14 +280,15 @@ int test_pool_destroy_during_execution(void *context)
 
 int test_pool_submit_lock_fails(void *context)
 {
+    int retv;
     up_pool_t *pool = (up_pool_t *) context;
 
     /* Destroy enq lock. */
     pthread_mutex_destroy(&pool->enq_lock);
 
     /* Try to submita task, should fail. */
-    int retv = up_pool_submit(pool, consumer_routine, NULL);
-    assert_equals(retv, EINVAL);
+    retv = up_pool_submit(pool, consumer_routine, NULL);
+    assert_equals(retv, UP_ERROR_MUTEX_LOCK);
 
     /* Assert nothing was added to the list. */
     assert_equals(pool->head->next, NULL);
@@ -298,10 +304,11 @@ void run(char *desc,
          void *(*test_setup) (),
          void (test_teardown) (void *))
 {
+    void *context = NULL;
+
     printf("%s...", desc);
 
     /* Run setup routine. */
-    void *context = NULL;
     if (test_setup != NULL) {
         context = test_setup();
     }

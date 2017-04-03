@@ -18,10 +18,38 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
+#include <pthread.h>
 #include <errno.h>
 
 #include "upool.h"
+
+
+#define up_handle_error_en(msg, en, retv) \
+    do { errno = en; perror(msg); return retv; } while (0)
+
+#define up_handle_error(msg, retv) \
+    do { perror(msg); return retv; } while (0)
+
+
+typedef struct up_task {
+    void (*task_routine) (void *);        /* Pointer to the routine to execute. */
+    void *arg;                            /* Pointer to the arg of the routine. */
+} up_task_t;
+
+typedef struct up_node {
+    up_task_t task;                       /* The task to be executed. */
+    struct up_node *next;                 /* Pointer to the next queue node. */
+} up_node_t;
+
+struct up_pool {
+    size_t thread_count;                  /* Number of threads of the Pool. */
+    size_t enq_count, deq_count;          /* Enqueued/Dequeued task counters. */
+    pthread_t *threads;                   /* Array of thread IDs. */
+    pthread_cond_t cond;                  /* Condition to signal threads for tasks. */
+    pthread_mutex_t enq_lock, deq_lock;   /* Task queue's locks. */
+    up_node_t *head, *tail;               /* Task queue's head, tail. */
+};
+
 
 /* Enqueue a new task into the pool's queue.
  *
@@ -33,16 +61,21 @@
  */
 static int up_pool_enq(up_pool_t *pool, up_task_t *task)
 {
-    up_node_t *node = (up_node_t *) malloc(sizeof(up_node_t));
-    if (node == NULL) { up_handle_error_return("up_pool_enq", UP_ERROR_MALLOC); }
+    int retv;
+    up_node_t *node;
+
+    node = (up_node_t *) malloc(sizeof(up_node_t));
+    if (node == NULL) {
+        up_handle_error("up_pool_enq:malloc", UP_ERROR_MALLOC);
+    }
 
     memcpy((void *) &node->task, (const void *) task, sizeof(up_task_t));
     node->next = NULL;
 
-    int retv = pthread_mutex_lock(&pool->enq_lock);
+    retv = pthread_mutex_lock(&pool->enq_lock);
     if (retv != 0) {
         free(node);
-        up_handle_error_en_return("up_pool_enq", retv, retv);
+        up_handle_error_en("up_pool_enq:pthread_mutex_lock", retv, UP_ERROR_MUTEX_LOCK);
     }
 
     pool->tail->next = node;
@@ -51,7 +84,9 @@ static int up_pool_enq(up_pool_t *pool, up_task_t *task)
     pool->enq_count += 1;
 
     retv = pthread_mutex_unlock(&pool->enq_lock);
-    if (retv != 0) { up_handle_error_return("up_pool_enq", retv); }
+    if (retv != 0) {
+        up_handle_error("up_pool_enq:pthread_mutex_unlock", UP_ERROR_MUTEX_LOCK);
+    }
 
     pthread_cond_signal(&pool->cond);
 
@@ -65,8 +100,13 @@ static int up_pool_enq(up_pool_t *pool, up_task_t *task)
  */
 static int up_pool_deq(up_pool_t *pool, up_task_t *task)
 {
-    int retv = pthread_mutex_lock(&pool->deq_lock);
-    if (retv != 0) { up_handle_error_return("up_pool_deq", retv); }
+    int retv;
+    up_node_t *old_head;
+
+    retv = pthread_mutex_lock(&pool->deq_lock);
+    if (retv != 0) {
+        up_handle_error("up_pool_deq:pthread_mutex_lock", UP_ERROR_MUTEX_LOCK);
+    }
 
     pool->deq_count += 1;
 
@@ -79,7 +119,7 @@ static int up_pool_deq(up_pool_t *pool, up_task_t *task)
         pthread_cond_wait(&pool->cond, &pool->deq_lock);
     }
 
-    up_node_t *old_head = pool->head;
+    old_head = pool->head;
 
     pool->head = pool->head->next;
 
@@ -88,7 +128,9 @@ static int up_pool_deq(up_pool_t *pool, up_task_t *task)
     memset((void *) &pool->head->task, 0, sizeof(up_task_t));
 
     retv = pthread_mutex_unlock(&pool->deq_lock);
-    if (retv != 0) { up_handle_error_return("up_pool_deq", retv); }
+    if (retv != 0) {
+        up_handle_error("up_pool_deq:pthread_mutex_unlock", UP_ERROR_MUTEX_LOCK);
+    }
 
     free(old_head);
 
@@ -103,10 +145,13 @@ static int up_pool_deq(up_pool_t *pool, up_task_t *task)
  */
 static void up_pool_worker_cleanup(void *arg)
 {
+    int retv;
     up_pool_t *pool = (up_pool_t *) arg;
 
-    int retv = pthread_mutex_unlock(&pool->deq_lock);
-    if (retv != 0) { perror("up_pool_worker_cleanup"); }
+    retv = pthread_mutex_unlock(&pool->deq_lock);
+    if (retv != 0) {
+        perror("up_pool_worker_cleanup:pthread_mutex_unlock");
+    }
 }
 
 /* Dequeue a task from the pool's queue and execute it.
@@ -118,6 +163,7 @@ static void up_pool_worker_cleanup(void *arg)
  */
 static void *up_pool_worker(void *arg)
 {
+    int retv, *retval;
     up_pool_t *pool = (up_pool_t *) arg;
 
     pthread_cleanup_push(up_pool_worker_cleanup, arg);
@@ -125,11 +171,11 @@ static void *up_pool_worker(void *arg)
     for ( ;; ) {
         up_task_t task;
 
-        int retv = up_pool_deq(pool, &task);
+        retv = up_pool_deq(pool, &task);
         if (retv != UP_SUCCESS) {
             perror("up_pool_worker");
 
-            int *retval = (int *) malloc(sizeof(int));
+            retval = (int *) malloc(sizeof(int));
             if (retval != NULL) {
                 *retval = retv;
             }
@@ -139,7 +185,9 @@ static void *up_pool_worker(void *arg)
         /* Disable and then re-enable cancel state in order to ensure
          * `task.task_routine`'s execution. */
         retv = pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
-        if (retv != 0) { perror("up_pool_worker: Could not disable cancel state."); }
+        if (retv != 0) {
+            perror("up_pool_worker: Could not disable cancel state.");
+        }
 
         task.task_routine(task.arg);
 
@@ -147,7 +195,7 @@ static void *up_pool_worker(void *arg)
         if (retv != 0) {
             perror("up_pool_worker");
 
-            int *retval = (int *) malloc(sizeof(int));
+            retval = (int *) malloc(sizeof(int));
             if (retval != NULL) {
                 *retval = retv;
             }
@@ -166,8 +214,14 @@ static void *up_pool_worker(void *arg)
  */
 int up_pool_create(up_pool_t **pool, size_t n)
 {
-    up_pool_t *p = (up_pool_t *) malloc(sizeof(up_pool_t));
-    if (p == NULL) { up_handle_error_return("up_pool_create", UP_ERROR_MALLOC); }
+    int retv;
+    size_t i;
+    up_pool_t *p;
+
+    p = (up_pool_t *) malloc(sizeof(up_pool_t));
+    if (p == NULL) {
+        up_handle_error("up_pool_create:malloc", UP_ERROR_MALLOC);
+    }
 
     *pool = p;
 
@@ -177,7 +231,9 @@ int up_pool_create(up_pool_t **pool, size_t n)
     p->deq_count = 0;
 
     p->threads = (pthread_t *) malloc(n * sizeof(pthread_t));
-    if (p->threads == NULL) { up_handle_error_return("up_pool_create", UP_ERROR_MALLOC); }
+    if (p->threads == NULL) {
+        up_handle_error("up_pool_create:malloc", UP_ERROR_MALLOC);
+    }
 
     pthread_cond_init(&p->cond, NULL);
 
@@ -185,13 +241,17 @@ int up_pool_create(up_pool_t **pool, size_t n)
     pthread_mutex_init(&p->deq_lock, NULL);
 
     p->head = (up_node_t *) calloc(1, sizeof(up_node_t));
-    if (p->head == NULL) { up_handle_error_return("up_pool_create", UP_ERROR_MALLOC); }
+    if (p->head == NULL) {
+        up_handle_error("up_pool_create:calloc", UP_ERROR_MALLOC);
+    }
 
     p->tail = p->head;
 
-    for (int i = 0; i < n; i++) {
-        int retv = pthread_create(&p->threads[i], NULL, up_pool_worker, p);
-        if (retv != 0) { up_handle_error_return("up_pool_create", UP_ERROR_THREAD_CREATE); }
+    for (i = 0; i < n; i++) {
+        retv = pthread_create(&p->threads[i], NULL, up_pool_worker, p);
+        if (retv != 0) {
+            up_handle_error("up_pool_create:pthread_create", UP_ERROR_THREAD_CREATE);
+        }
     }
 
     return UP_SUCCESS;
@@ -204,29 +264,43 @@ int up_pool_create(up_pool_t **pool, size_t n)
  */
 int up_pool_destroy(up_pool_t *pool)
 {
-    for (int i = 0; i < pool->thread_count; i++) {
-        int retv = pthread_cancel(pool->threads[i]);
-        if (retv != 0) { perror("up_pool_destroy"); }
+    int retv;
+    size_t i;
+    up_node_t *c, *t;
+
+    for (i = 0; i < pool->thread_count; i++) {
+        retv = pthread_cancel(pool->threads[i]);
+        if (retv != 0) {
+            perror("up_pool_destroy:pthread_cancel");
+        }
     }
 
-    for (int i = 0; i < pool->thread_count; i++) {
-        int retv = pthread_join(pool->threads[i], NULL);
-        if (retv != 0) { up_handle_error_return("up_pool_destroy", retv); }
+    for (i = 0; i < pool->thread_count; i++) {
+        retv = pthread_join(pool->threads[i], NULL);
+        if (retv != 0) {
+            up_handle_error("up_pool_destroy:pthread_join", UP_ERROR_THREAD_JOIN);
+        }
     }
 
     free(pool->threads);
 
-    int retv = pthread_cond_destroy(&pool->cond);
-    if (retv != 0) { up_handle_error_return("up_pool_destroy", retv); }
+    retv = pthread_cond_destroy(&pool->cond);
+    if (retv != 0) {
+        up_handle_error("up_pool_destroy:pthread_cond_destroy", UP_ERROR_COND_DESTROY);
+    }
 
     retv = pthread_mutex_destroy(&pool->enq_lock);
-    if (retv != 0) { up_handle_error_return("up_pool_destroy", retv); }
+    if (retv != 0) {
+        up_handle_error("up_pool_destroy:pthread_mutex_destroy", UP_ERROR_MUTEX_DESTROY);
+    }
 
     retv = pthread_mutex_destroy(&pool->deq_lock);
-    if (retv != 0) { up_handle_error_return("up_pool_destroy", retv); }
+    if (retv != 0) {
+        up_handle_error("up_pool_destroy:pthread_mutex_destroy", UP_ERROR_MUTEX_DESTROY);
+    }
 
-    for (up_node_t *c = pool->head; c != NULL; ) {
-        up_node_t *t = c;
+    for (c = pool->head; c != NULL; ) {
+        t = c;
         c = c->next;
         free(t);
     }
@@ -239,12 +313,13 @@ int up_pool_destroy(up_pool_t *pool)
 /* Submit a new task to the pool's queue. */
 int up_pool_submit(up_pool_t *pool, void (*task_routine) (void *), void *arg)
 {
+    int retv;
     up_task_t task;
 
     task.task_routine = task_routine;
     task.arg = arg;
 
-    int retv = up_pool_enq(pool, &task);
+    retv = up_pool_enq(pool, &task);
 
     return retv;
 }
@@ -259,12 +334,18 @@ int up_pool_submit(up_pool_t *pool, void (*task_routine) (void *), void *arg)
  */
 int up_pool_wait(up_pool_t *pool)
 {
-    int retv = pthread_mutex_lock(&pool->enq_lock);
-    if (retv != 0) { up_handle_error_return("up_pool_wait", retv); }
+    int retv;
+
+    retv = pthread_mutex_lock(&pool->enq_lock);
+    if (retv != 0) {
+        up_handle_error("up_pool_wait:pthread_mutex_lock", UP_ERROR_MUTEX_LOCK);
+    }
 
     for ( ;; ) {
         retv = pthread_mutex_lock(&pool->deq_lock);
-        if (retv != 0) { up_handle_error_return("up_pool_wait", retv); }
+        if (retv != 0) {
+            up_handle_error("up_pool_wait:pthread_mutex_lock", UP_ERROR_MUTEX_LOCK);
+        }
 
         if (pool->thread_count + pool->enq_count != pool->deq_count) {
             /* TODO: When the consumer threads are first created increase
@@ -272,7 +353,9 @@ int up_pool_wait(up_pool_t *pool)
              *       make this a little better. This is why we add
              *       `pool->thread_count` here. */
             retv = pthread_mutex_unlock(&pool->deq_lock);
-            if (retv != 0) { up_handle_error_return("up_pool_wait", retv); }
+            if (retv != 0) {
+                up_handle_error("up_pool_wait:pthread_mutex_unlock", UP_ERROR_MUTEX_LOCK);
+            }
         } else {
             pool->enq_count = 0;
             pool->deq_count = pool->thread_count;
@@ -286,11 +369,17 @@ int up_pool_wait(up_pool_t *pool)
 /* Unlock the pool queue's locks. */
 int up_pool_release(up_pool_t *pool)
 {
-    int retv = pthread_mutex_unlock(&pool->enq_lock);
-    if (retv != 0) { up_handle_error_return("up_pool_release", retv); }
+    int retv;
+
+    retv = pthread_mutex_unlock(&pool->enq_lock);
+    if (retv != 0) {
+        up_handle_error("up_pool_release:pthread_mutex_unlock", UP_ERROR_MUTEX_LOCK);
+    }
 
     retv = pthread_mutex_unlock(&pool->deq_lock);
-    if (retv != 0) { up_handle_error_return("up_pool_release", retv); }
+    if (retv != 0) {
+        up_handle_error("up_pool_release:pthread_mutex_unlock", UP_ERROR_MUTEX_LOCK);
+    }
 
     return UP_SUCCESS;
 }
