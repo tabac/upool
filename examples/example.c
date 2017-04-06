@@ -23,7 +23,7 @@ void consumer_routine_opposite(void *arg);
 
 int main()
 {
-    size_t i;
+    size_t i, s;
     up_pool_t *pool;
     ConsumerContext *c;
     ProducerContext *p;
@@ -64,14 +64,13 @@ int main()
     }
 
     /* Wait for Pool. */
-    up_pool_wait(pool);
+    do {
+        up_pool_queue_size(pool, &s);
+    } while (s != 0);
 
     for (i = 0; i < INPUT_SIZE; i++) {
         printf("(%d, %d)\n", c[i].in, c[i].out);
     }
-
-    /* Release Pool's locks. */
-    up_pool_release(pool);
 
     /* Destroy Pool. */
     up_pool_destroy(pool);

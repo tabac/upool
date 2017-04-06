@@ -29,12 +29,6 @@ int main()
         up_pool_submit(pool, largest_prime_naive, (void *) &args[i]);
     }
 
-    /* Wait for Pool. */
-    up_pool_wait(pool);
-
-    /* Release Pool's locks. */
-    up_pool_release(pool);
-
     /* Destroy Pool. */
     up_pool_destroy(pool);
 

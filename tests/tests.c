@@ -28,6 +28,7 @@ int test_pool_enq_deq_locked(void *context);
 int test_pool_deq_enq_locked(void *context);
 int test_pool_destroy_during_execution(void *context);
 int test_pool_submit_lock_fails(void *context);
+int test_pool_submit_nonblocking(void *context);
 
 void consumer_routine(void *arg);
 void consumer_routine_sleeper(void *arg);
@@ -53,6 +54,11 @@ int main()
         test_pool_destroy_during_execution,
         setup_pool,
         NULL);
+
+    run("test_pool_submit_nonblocking",
+        test_pool_submit_nonblocking,
+        setup_pool,
+        teardown_pool);
 
     return 0;
 }
@@ -122,7 +128,8 @@ int test_pool_enq_deq_locked(void *context)
     }
 
     /* Release locks. */
-    up_pool_release(pool);
+    pthread_mutex_unlock(&pool->enq_lock);
+    pthread_mutex_unlock(&pool->deq_lock);
 
     /* Assert deq counter updated. */
     assert_equals(pool->deq_count, 5);
@@ -167,7 +174,8 @@ int test_pool_deq_enq_locked(void *context)
     assert_equals(pool->deq_count, 5);
 
     /* Release locks. */
-    up_pool_release(pool);
+    pthread_mutex_unlock(&pool->enq_lock);
+    pthread_mutex_unlock(&pool->deq_lock);
 
     return 0;
 }
@@ -295,6 +303,27 @@ int test_pool_submit_lock_fails(void *context)
 
     /* Re-init mutex for teardown to work. */
     pthread_mutex_init(&pool->enq_lock, NULL);
+
+    return 0;
+}
+
+int test_pool_submit_nonblocking(void *context)
+{
+    int retv;
+    up_pool_t *pool = (up_pool_t *) context;
+
+    /* Pause task submition. */
+    up_pool_pause_submit(pool);
+
+    /* Try to submit a task, should fail with UP_ERROR_MUTEX_BUSY. */
+    retv = up_pool_submit_nonblocking(pool, consumer_routine, NULL);
+    assert_equals(retv, UP_ERROR_MUTEX_BUSY);
+
+    /* Assert nothing was added to the list. */
+    assert_equals(pool->head->next, NULL);
+
+    /* Resume task submition. */
+    up_pool_resume_submit(pool);
 
     return 0;
 }
