@@ -28,7 +28,7 @@ int test_pool_enq_deq_locked(void *context);
 int test_pool_deq_enq_locked(void *context);
 int test_pool_destroy_during_execution(void *context);
 int test_pool_submit_lock_fails(void *context);
-int test_pool_submit_nonblocking(void *context);
+int test_pool_queue_size(void *context);
 
 void consumer_routine(void *arg);
 void consumer_routine_sleeper(void *arg);
@@ -55,8 +55,8 @@ int main()
         setup_pool,
         NULL);
 
-    run("test_pool_submit_nonblocking",
-        test_pool_submit_nonblocking,
+    run("test_pool_queue_size",
+        test_pool_queue_size,
         setup_pool,
         teardown_pool);
 
@@ -68,18 +68,6 @@ void *setup_pool()
     /* Create pool. */
     up_pool_t *pool = NULL;
     up_pool_create(&pool, 4);
-
-    /* Wait for all the threads to be spawned and ready. */
-    for ( ;; ) {
-        pthread_mutex_lock(&pool->deq_lock);
-
-        if (pool->thread_count != pool->deq_count) {
-            pthread_mutex_unlock(&pool->deq_lock);
-        } else {
-            pthread_mutex_unlock(&pool->deq_lock);
-            break;
-        }
-    }
 
     return (void *) pool;
 }
@@ -98,6 +86,7 @@ void consumer_routine(void *arg)
 int test_pool_enq_deq_locked(void *context)
 {
     int retv;
+    size_t c;
     up_pool_t *pool = (up_pool_t *) context;
 
     /* Block task execution. */
@@ -114,25 +103,14 @@ int test_pool_enq_deq_locked(void *context)
     /* Unblock task execution. */
     pthread_mutex_unlock(&pool->deq_lock);
 
-    /* Wait for tasks to finish without counter reset. */
-    pthread_mutex_lock(&pool->enq_lock);
-
-    for ( ;; ) {
+    /* Wait for tasks to finish. */
+    do {
         pthread_mutex_lock(&pool->deq_lock);
 
-        if (pool->thread_count + pool->enq_count != pool->deq_count) {
-            pthread_mutex_unlock(&pool->deq_lock);
-        } else {
-            break;
-        }
-    }
+        c = pool->deq_count;
 
-    /* Release locks. */
-    pthread_mutex_unlock(&pool->enq_lock);
-    pthread_mutex_unlock(&pool->deq_lock);
-
-    /* Assert deq counter updated. */
-    assert_equals(pool->deq_count, 5);
+        pthread_mutex_unlock(&pool->deq_lock);
+    } while (c != 1);
 
     return 0;
 }
@@ -140,6 +118,7 @@ int test_pool_enq_deq_locked(void *context)
 int test_pool_deq_enq_locked(void *context)
 {
     int retv;
+    size_t c;
     up_pool_t *pool = (up_pool_t *) context;
 
     /* Block task execution. */
@@ -159,23 +138,17 @@ int test_pool_deq_enq_locked(void *context)
     /* Unblock task execution. */
     pthread_mutex_unlock(&pool->deq_lock);
 
-    /* Wait for tasks to finish without counter reset. */
-    for ( ;; ) {
+    /* Wait for tasks to finish. */
+    do {
         pthread_mutex_lock(&pool->deq_lock);
 
-        if (pool->thread_count + pool->enq_count != pool->deq_count) {
-            pthread_mutex_unlock(&pool->deq_lock);
-        } else {
-            break;
-        }
-    }
+        c = pool->deq_count;
 
-    /* Assert deq counter updated. */
-    assert_equals(pool->deq_count, 5);
+        pthread_mutex_unlock(&pool->deq_lock);
+    } while (c != 1);
 
     /* Release locks. */
     pthread_mutex_unlock(&pool->enq_lock);
-    pthread_mutex_unlock(&pool->deq_lock);
 
     return 0;
 }
@@ -294,7 +267,7 @@ int test_pool_submit_lock_fails(void *context)
     /* Destroy enq lock. */
     pthread_mutex_destroy(&pool->enq_lock);
 
-    /* Try to submita task, should fail. */
+    /* Try to submit a task, should fail. */
     retv = up_pool_submit(pool, consumer_routine, NULL);
     assert_equals(retv, UP_ERROR_MUTEX_LOCK);
 
@@ -307,25 +280,48 @@ int test_pool_submit_lock_fails(void *context)
     return 0;
 }
 
-int test_pool_submit_nonblocking(void *context)
+int test_pool_queue_size(void *context)
 {
     int retv;
+    size_t i, s, t;
     up_pool_t *pool = (up_pool_t *) context;
 
-    /* Pause task submition. */
-    up_pool_pause_submit(pool);
+    /* Cancel the threads to keep the tasks from beeing consumed. */
+    for (i = 0; i < pool->thread_count; i++) {
+        pthread_cancel(pool->threads[i]);
+        pthread_join(pool->threads[i], NULL);
+    }
 
-    /* Try to submit a task, should fail with UP_ERROR_MUTEX_BUSY. */
-    retv = up_pool_submit_nonblocking(pool, consumer_routine, NULL);
-    assert_equals(retv, UP_ERROR_MUTEX_BUSY);
+    /* Submit two tasks. */
+    retv = up_pool_submit(pool, consumer_routine, NULL);
+    assert_equals(retv, UP_SUCCESS);
 
-    /* Assert nothing was added to the list. */
-    assert_equals(pool->head->next, NULL);
+    retv = up_pool_submit(pool, consumer_routine, NULL);
+    assert_equals(retv, UP_SUCCESS);
 
-    /* Resume task submition. */
-    up_pool_resume_submit(pool);
+    /* Assert queue size. */
+    retv = up_pool_queue_size(pool, &s);
+    assert_equals(retv, UP_SUCCESS);
+    assert_equals(s, 2);
 
-    return 0;
+    /* Create the consumer threads again. */
+    for (i = 0; i < 4; i++) {
+        pthread_create(&pool->threads[i], NULL, up_pool_worker, pool);
+    }
+
+    /* Wait for all the threads to be created.
+     *
+     * Eventually the tasks will be consumed too so:
+     *      `deq_count` = 2 (tasks) + 4 (threads) = 6. */
+    do {
+        pthread_mutex_lock(&pool->deq_lock);
+
+        t = pool->deq_count;
+
+        pthread_mutex_unlock(&pool->deq_lock);
+    } while (t != 6);
+
+     return 0;
 }
 
 void run(char *desc,

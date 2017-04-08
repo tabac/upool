@@ -28,6 +28,7 @@
 #define UP_ERROR_COND_DESTROY -7
 #define UP_ERROR_CONF_INVAL -8
 
+/* The thread pool. */
 typedef struct up_pool up_pool_t;
 
 /* Create a new thread pool. */
@@ -38,21 +39,6 @@ int up_pool_destroy(up_pool_t *pool);
 
 /* Submit a new task to the pool's queue. Blocks until the task is enqueued. */
 int up_pool_submit(up_pool_t *pool, void (*task_routine) (void *), void *arg);
-
-/* Submit a new task to the pool's queue. Do not block if the queue lock is acquired. */
-int up_pool_submit_nonblocking(up_pool_t *pool, void (*task_routine) (void *), void *arg);
-
-/* Pause the submition of tasks. Running tasks are not interrupted. */
-int up_pool_pause_submit(up_pool_t *pool);
-
-/* Pause the execution of tasks. Running tasks are not interrupted. */
-int up_pool_pause_exec(up_pool_t *pool);
-
-/* Resume the submition of tasks. */
-int up_pool_resume_submit(up_pool_t *pool);
-
-/* Resume the execution of tasks. */
-int up_pool_resume_exec(up_pool_t *pool);
 
 /* Return the number of enqueued tasks (not yet executed). */
 int up_pool_queue_size(up_pool_t *pool, size_t *size);

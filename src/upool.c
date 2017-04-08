@@ -31,16 +31,19 @@
     do { perror(msg); return retv; } while (0)
 
 
+/* A task to be executed. */
 typedef struct up_task {
     void (*task_routine) (void *);        /* Pointer to the routine to execute. */
     void *arg;                            /* Pointer to the arg of the routine. */
 } up_task_t;
 
+/* A node of the task queue (linked list). */
 typedef struct up_node {
     up_task_t task;                       /* The task to be executed. */
     struct up_node *next;                 /* Pointer to the next queue node. */
 } up_node_t;
 
+/* The thread pool. */
 struct up_pool {
     size_t thread_count;                  /* Number of threads of the Pool. */
     size_t enq_count, deq_count;          /* Enqueued/Dequeued task counters. */
@@ -59,7 +62,7 @@ struct up_pool {
  * that one consumer thread waiting on `pool->cond` can wake up
  * and consume the new task.
  */
-static int up_pool_enq(up_pool_t *pool, up_task_t *task, int nonblocking)
+static int up_pool_enq(up_pool_t *pool, up_task_t *task)
 {
     int retv;
     up_node_t *node;
@@ -72,21 +75,10 @@ static int up_pool_enq(up_pool_t *pool, up_task_t *task, int nonblocking)
     memcpy((void *) &node->task, (const void *) task, sizeof(up_task_t));
     node->next = NULL;
 
-    if (nonblocking == 0) {
-        retv = pthread_mutex_lock(&pool->enq_lock);
-        if (retv != 0) {
-            free(node);
-            up_handle_error_en("up_pool_enq:pthread_mutex_lock", retv, UP_ERROR_MUTEX_LOCK);
-        }
-    } else {
-        retv = pthread_mutex_trylock(&pool->enq_lock);
-        if (retv == EBUSY) {
-            free(node);
-            return UP_ERROR_MUTEX_BUSY;
-        } else if (retv != 0) {
-            free(node);
-            up_handle_error_en("up_pool_enq:pthread_mutex_lock", retv, UP_ERROR_MUTEX_LOCK);
-        }
+    retv = pthread_mutex_lock(&pool->enq_lock);
+    if (retv != 0) {
+        free(node);
+        up_handle_error_en("up_pool_enq:pthread_mutex_lock", retv, UP_ERROR_MUTEX_LOCK);
     }
 
     pool->tail->next = node;
@@ -174,7 +166,7 @@ static void up_pool_worker_cleanup(void *arg)
  */
 static void *up_pool_worker(void *arg)
 {
-    int retv, *retval;
+    int retv;
     up_pool_t *pool = (up_pool_t *) arg;
 
     pthread_cleanup_push(up_pool_worker_cleanup, arg);
@@ -184,13 +176,8 @@ static void *up_pool_worker(void *arg)
 
         retv = up_pool_deq(pool, &task);
         if (retv != UP_SUCCESS) {
-            perror("up_pool_worker");
-
-            retval = (int *) malloc(sizeof(int));
-            if (retval != NULL) {
-                *retval = retv;
-            }
-            pthread_exit((void *) retval);
+            perror("up_pool_worker:up_pool_deq");
+            pthread_exit(NULL);
         }
 
         /* Disable and then re-enable cancel state in order to ensure
@@ -204,13 +191,8 @@ static void *up_pool_worker(void *arg)
 
         retv = pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
         if (retv != 0) {
-            perror("up_pool_worker");
-
-            retval = (int *) malloc(sizeof(int));
-            if (retval != NULL) {
-                *retval = retv;
-            }
-            pthread_exit((void *) retval);
+            perror("up_pool_worker: Could not enable cancel state.");
+            pthread_exit(NULL);
         }
     }
 
@@ -221,12 +203,12 @@ static void *up_pool_worker(void *arg)
 
 /* Create a new thread pool.
  *
- * After allocating resources the threads are spawned.
+ * After allocating resources the threads are beeing created.
  */
 int up_pool_create(up_pool_t **pool, size_t n)
 {
     int retv;
-    size_t i;
+    size_t i, t;
     up_pool_t *p;
 
     if (n < 1) {
@@ -268,6 +250,22 @@ int up_pool_create(up_pool_t **pool, size_t n)
             up_handle_error("up_pool_create:pthread_create", UP_ERROR_THREAD_CREATE);
         }
     }
+
+    do {
+        retv = pthread_mutex_lock(&p->deq_lock);
+        if (retv != 0) {
+            up_handle_error("up_pool_create:pthread_mutex_lock", UP_ERROR_MUTEX_LOCK);
+        }
+
+        t = p->deq_count;
+
+        retv = pthread_mutex_unlock(&p->deq_lock);
+        if (retv != 0) {
+            up_handle_error("up_pool_create:pthread_mutex_unlock", UP_ERROR_MUTEX_LOCK);
+        }
+    } while (t != n);
+
+    p->deq_count = 0;
 
     return UP_SUCCESS;
 }
@@ -334,75 +332,9 @@ int up_pool_submit(up_pool_t *pool, void (*task_routine) (void *), void *arg)
     task.task_routine = task_routine;
     task.arg = arg;
 
-    retv = up_pool_enq(pool, &task, 0);
+    retv = up_pool_enq(pool, &task);
 
     return retv;
-}
-
-/* Submit a new task to the pool's queue. Do not block if the queue lock is acquired. */
-int up_pool_submit_nonblocking(up_pool_t *pool, void (*task_routine) (void *), void *arg)
-{
-    int retv;
-    up_task_t task;
-
-    task.task_routine = task_routine;
-    task.arg = arg;
-
-    retv = up_pool_enq(pool, &task, 1);
-
-    return retv;
-}
-
-/* Pause the submition of tasks. Running tasks are not interrupted. */
-int up_pool_pause_submit(up_pool_t *pool)
-{
-    int retv;
-
-    retv = pthread_mutex_lock(&pool->enq_lock);
-    if (retv != 0) {
-        up_handle_error("up_pool_pause_submit:pthread_mutex_lock", UP_ERROR_MUTEX_LOCK);
-    }
-
-    return UP_SUCCESS;
-}
-
-/* Pause the execution of tasks. Running tasks are not interrupted. */
-int up_pool_pause_exec(up_pool_t *pool)
-{
-    int retv;
-
-    retv = pthread_mutex_lock(&pool->deq_lock);
-    if (retv != 0) {
-        up_handle_error("up_pool_pause_exec:pthread_mutex_lock", UP_ERROR_MUTEX_LOCK);
-    }
-
-    return UP_SUCCESS;
-}
-
-/* Resume the submition of tasks. */
-int up_pool_resume_submit(up_pool_t *pool)
-{
-    int retv;
-
-    retv = pthread_mutex_unlock(&pool->enq_lock);
-    if (retv != 0) {
-        up_handle_error("up_pool_resume_submit:pthread_mutex_unlock", UP_ERROR_MUTEX_LOCK);
-    }
-
-    return UP_SUCCESS;
-}
-
-/* Resume the execution of tasks. */
-int up_pool_resume_exec(up_pool_t *pool)
-{
-    int retv;
-
-    retv = pthread_mutex_unlock(&pool->deq_lock);
-    if (retv != 0) {
-        up_handle_error("up_pool_resume_exec:pthread_mutex_unlock", UP_ERROR_MUTEX_LOCK);
-    }
-
-    return UP_SUCCESS;
 }
 
 /* Return the number of enqueued tasks (not yet executed). */
@@ -420,7 +352,7 @@ int up_pool_queue_size(up_pool_t *pool, size_t *size)
         up_handle_error("up_pool_queue_size:pthread_mutex_lock", UP_ERROR_MUTEX_LOCK);
     }
 
-    *size = pool->deq_count - pool->enq_count - pool->thread_count;
+    *size = pool->enq_count - pool->deq_count;
 
     retv = pthread_mutex_unlock(&pool->enq_lock);
     if (retv != 0) {
